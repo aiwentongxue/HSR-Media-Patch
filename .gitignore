@@ -1,0 +1,9 @@
+.DS_Store
+.work/
+dist/
+payload/GStreamer.framework.tar.xz
+payload/GStreamer.framework.tar.xz.sha256
+tools/dlopen-probe
+tools/gst-probe
+*.log
+

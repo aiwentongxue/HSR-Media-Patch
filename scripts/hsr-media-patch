@@ -1,0 +1,851 @@
+#!/bin/zsh
+emulate -L zsh
+setopt ERR_EXIT NO_UNSET PIPE_FAIL NULL_GLOB TYPESET_SILENT
+
+SELF_PATH="${0:A}"
+REPO_ROOT="${HSR_MEDIA_REPO_ROOT:-${SELF_PATH:h:h}}"
+PAYLOAD_DIR="${REPO_ROOT}/payload"
+PAYLOAD_ARCHIVE="${PAYLOAD_DIR}/GStreamer.framework.tar.xz"
+PAYLOAD_HASH_FILE="${PAYLOAD_ARCHIVE}.sha256"
+TOOLS_DIR="${REPO_ROOT}/tools"
+DLOPEN_PROBE="${TOOLS_DIR}/dlopen-probe"
+GST_PROBE="${TOOLS_DIR}/gst-probe"
+USER_HOME_ROOT="${HSR_MEDIA_USER_HOME:-$HOME}"
+APP_SUPPORT="${USER_HOME_ROOT}/Library/Application Support/HSR-Media-Patch"
+LOG_DIR="${USER_HOME_ROOT}/Library/Logs/HSR-Media-Patch"
+BACKUP_ROOT="${APP_SUPPORT}/Backups"
+STABLE_APP="/Applications/CrossOver.app"
+PREVIEW_APP="/Applications/CrossOver Preview.app"
+STABLE_TARGET="/Applications/CrossOver-HSR-MediaFix.app"
+PREVIEW_TARGET="/Applications/CrossOver Preview-HSR-MediaFix.app"
+STABLE_VERSION="26.3.0.39832"
+PREVIEW_VERSION="27.0.0.41073"
+
+mkdir -p "${LOG_DIR}" "${BACKUP_ROOT}"
+LOG_FILE="${LOG_DIR}/$(date +%Y%m%d-%H%M%S)-$$.log"
+
+cleanup_stage() {
+  local stage="${HSR_MEDIA_STAGE_ROOT:-}"
+  if [[ -n "${stage}" && -d "${stage}" ]]; then
+    /bin/rm -rf "${stage}"
+  fi
+}
+trap cleanup_stage EXIT
+
+log() {
+  local line="$*"
+  print -r -- "${line}"
+  print -r -- "${line}" >> "${LOG_FILE}"
+}
+
+warn() {
+  local line="$*"
+  print -u2 -r -- "警告：${line}"
+  print -u2 -r -- "警告：${line}" >> "${LOG_FILE}"
+}
+
+die() {
+  local code="$1"
+  shift
+  print -u2 -r -- "错误：$*"
+  print -u2 -r -- "错误：$*" >> "${LOG_FILE}"
+  print -u2 -r -- "日志：${LOG_FILE}"
+  exit "${code}"
+}
+
+run_logged() {
+  log "+ $*"
+  "$@" 2>&1 | tee -a "${LOG_FILE}"
+  return ${pipestatus[1]}
+}
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  print -rn -- "${value}"
+}
+
+json_array() {
+  local first=1
+  local item
+  print -rn -- "["
+  for item in "$@"; do
+    if (( ! first )); then
+      print -rn -- ","
+    fi
+    first=0
+    print -rn -- "\"$(json_escape "${item}")\""
+  done
+  print -rn -- "]"
+}
+
+hash_file() {
+  /usr/bin/shasum -a 256 "$1" | awk '{print $1}'
+}
+
+runtime_root() {
+  print -r -- "$1/Contents/SharedSupport/CrossOver"
+}
+
+conf_value() {
+  local conf="$1"
+  local key="$2"
+  /usr/bin/sed -nE "s/^\"${key}\"[[:space:]]*=[[:space:]]*\"(.*)\"[[:space:]]*$/\\1/p" \
+    "${conf}" | /usr/bin/head -n 1
+}
+
+detect_layout() {
+  local app="$1"
+  local cx
+  cx="$(runtime_root "${app}")"
+
+  if [[ -d "${cx}/lib64/gstreamer-1.0" || -d "${cx}/lib64" ]]; then
+    print -r -- "stable"
+    return 0
+  fi
+  if [[ -d "${cx}/lib/x86_64/gstreamer-1.0" || -d "${cx}/lib/x86_64" ]]; then
+    print -r -- "preview"
+    return 0
+  fi
+  return 1
+}
+
+product_display_name() {
+  case "$1" in
+    stable) print -r -- "正式版 CrossOver" ;;
+    preview) print -r -- "CrossOver Preview" ;;
+    *) print -r -- "$1" ;;
+  esac
+}
+
+expected_version() {
+  case "$1" in
+    stable) print -r -- "${STABLE_VERSION}" ;;
+    preview) print -r -- "${PREVIEW_VERSION}" ;;
+  esac
+}
+
+source_app_for_product() {
+  case "$1" in
+    stable) print -r -- "${STABLE_APP}" ;;
+    preview) print -r -- "${PREVIEW_APP}" ;;
+    *) return 1 ;;
+  esac
+}
+
+target_app_for_product() {
+  case "$1" in
+    stable) print -r -- "${STABLE_TARGET}" ;;
+    preview) print -r -- "${PREVIEW_TARGET}" ;;
+    *) return 1 ;;
+  esac
+}
+
+lib_root_for_product() {
+  local cx
+  cx="$(runtime_root "$2")"
+  case "$1" in
+    stable) print -r -- "${cx}/lib64" ;;
+    preview) print -r -- "${cx}/lib/x86_64" ;;
+  esac
+}
+
+rpath_for_product() {
+  case "$1" in
+    stable) print -r -- "@loader_path/../../../lib64/GStreamer.framework/Versions/Current/lib" ;;
+    preview) print -r -- "@loader_path/../../../lib/x86_64/GStreamer.framework/Versions/Current/lib" ;;
+  esac
+}
+
+winegstreamer_for_app() {
+  print -r -- "$1/Contents/SharedSupport/CrossOver/lib/wine/x86_64-unix/winegstreamer.so"
+}
+
+inspect_app() {
+  local app="$1"
+  local expected="${2:-}"
+  [[ -d "${app}" ]] || return 1
+
+  local cx conf version build_tag layout wgs arch
+  cx="$(runtime_root "${app}")"
+  conf="${cx}/etc/CrossOver.conf"
+  [[ -f "${conf}" ]] || return 1
+  version="$(conf_value "${conf}" ProductVersion)"
+  build_tag="$(conf_value "${conf}" BuildTag)"
+  layout="$(detect_layout "${app}")" || return 1
+  local plugin_dir
+  plugin_dir="$(lib_root_for_product "${layout}" "${app}")/gstreamer-1.0"
+  [[ -e "${plugin_dir}" || -L "${plugin_dir}" ]] || return 1
+  wgs="$(winegstreamer_for_app "${app}")"
+  [[ -f "${wgs}" ]] || return 1
+  arch="$(/usr/bin/lipo -archs "${wgs}" 2>/dev/null || true)"
+  [[ "${arch}" == *x86_64* ]] || return 1
+  /usr/bin/otool -L "${wgs}" | /usr/bin/grep -Fq "@rpath/libgstreamer-1.0.0.dylib" || return 1
+
+  if [[ -n "${expected}" && "${layout}" != "${expected}" ]]; then
+    return 1
+  fi
+
+  print -r -- "${app}|${version}|${build_tag}|${layout}"
+}
+
+print_detection_line() {
+  local record="$1"
+  local app version build layout
+  IFS='|' read -r app version build layout <<< "${record}"
+  print -r -- "  App：${app}"
+  print -r -- "  版本：${version}"
+  print -r -- "  Build：${build}"
+  print -r -- "  布局：${layout}"
+}
+
+detect_product() {
+  local product="$1"
+  local app expected
+  app="$(source_app_for_product "${product}")" || return 1
+  expected="${product}"
+  inspect_app "${app}" "${expected}"
+}
+
+detect_all_installed() {
+  local found=0 record
+  if record="$(detect_product stable)"; then
+    print -r -- "${record}"
+    found=1
+  fi
+  if record="$(detect_product preview)"; then
+    print -r -- "${record}"
+    found=1
+  fi
+  (( found ))
+}
+
+list_installed_products() {
+  local products=()
+  detect_product stable >/dev/null && products+=(stable)
+  detect_product preview >/dev/null && products+=(preview)
+  print -rl -- "${products[@]}"
+}
+
+assert_known_or_experimental() {
+  local product="$1" version="$2" experimental="$3" confirm="$4"
+  local expected
+  expected="$(expected_version "${product}")"
+  if [[ "${version}" == "${expected}" ]]; then
+    return 0
+  fi
+  if [[ "${experimental}" != "1" || "${confirm}" != "1" ]]; then
+    die 2 "检测到未验证版本 ${version}。完整支持版本为 ${expected}；实验模式需同时使用 --experimental 和 --yes。"
+  fi
+  warn "将按实验模式处理 ${product} ${version}。"
+}
+
+ensure_not_running() {
+  if /usr/bin/pgrep -x wineserver-x86 >/dev/null \
+    || /usr/bin/pgrep -x wineserver-arm64 >/dev/null; then
+    die 3 "检测到 Wine 进程。请完全退出 CrossOver 和所有游戏后重试。"
+  fi
+
+  local app
+  for app in "${STABLE_APP}" "${PREVIEW_APP}" "${STABLE_TARGET}" "${PREVIEW_TARGET}"; do
+    if [[ -n "${app}" ]] && /usr/bin/pgrep -f "${app}/Contents/MacOS/" >/dev/null; then
+      die 3 "App 正在运行：${app}。请退出后再执行。"
+    fi
+  done
+}
+
+ensure_payload() {
+  [[ -f "${PAYLOAD_ARCHIVE}" ]] || die 3 "缺少发布 payload：${PAYLOAD_ARCHIVE}。请使用完整 Release ZIP，不要只下载源码。"
+  [[ -x "${DLOPEN_PROBE}" ]] || die 4 "缺少工具：${DLOPEN_PROBE}"
+  [[ -x "${GST_PROBE}" ]] || die 4 "缺少工具：${GST_PROBE}"
+  [[ -f "${PAYLOAD_HASH_FILE}" ]] || die 4 "缺少 payload 校验文件：${PAYLOAD_HASH_FILE}"
+  local actual expected
+  actual="$(hash_file "${PAYLOAD_ARCHIVE}")"
+  expected="$(/usr/bin/tr -d '[:space:]' < "${PAYLOAD_HASH_FILE}")"
+  [[ "${actual}" == "${expected}" ]] || die 4 "payload SHA-256 不匹配。期望 ${expected}，实际 ${actual}。"
+}
+
+elevate_if_needed() {
+  if (( EUID == 0 )); then
+    return 0
+  fi
+  log "需要管理员权限，正在准备可被 root 读取的最小运行包。"
+  local stage_root="/tmp/HSR-Media-Patch-root-$$-$RANDOM"
+  mkdir -p "${stage_root}/scripts" "${stage_root}/tools" "${stage_root}/payload"
+  /usr/bin/ditto --norsrc --noextattr "${REPO_ROOT}/scripts/hsr-media-patch" \
+    "${stage_root}/scripts/hsr-media-patch"
+  /usr/bin/ditto --norsrc --noextattr "${TOOLS_DIR}/dlopen-probe" \
+    "${stage_root}/tools/dlopen-probe"
+  /usr/bin/ditto --norsrc --noextattr "${TOOLS_DIR}/gst-probe" \
+    "${stage_root}/tools/gst-probe"
+  /usr/bin/ditto --norsrc --noextattr "${PAYLOAD_ARCHIVE}" \
+    "${stage_root}/payload/GStreamer.framework.tar.xz"
+  /usr/bin/ditto --norsrc --noextattr "${PAYLOAD_HASH_FILE}" \
+    "${stage_root}/payload/GStreamer.framework.tar.xz.sha256"
+  chmod +x "${stage_root}/scripts/hsr-media-patch" \
+    "${stage_root}/tools/dlopen-probe" "${stage_root}/tools/gst-probe"
+  exec /usr/bin/sudo /usr/bin/env \
+    HSR_MEDIA_USER_HOME="${USER_HOME_ROOT}" \
+    HSR_MEDIA_ELEVATED=1 \
+    HSR_MEDIA_REPO_ROOT="${stage_root}" \
+    HSR_MEDIA_STAGE_ROOT="${stage_root}" \
+    "${stage_root}/scripts/hsr-media-patch" "$@"
+}
+
+create_backup_id() {
+  print -r -- "$(date +%Y%m%d-%H%M%S)-$$-$RANDOM"
+}
+
+collect_conflicts() {
+  local lib_root="$1"
+  local names=()
+  local pattern
+  for pattern in \
+    'libgst*.dylib' 'libglib*.dylib' 'libgobject*.dylib' 'libgio*.dylib' \
+    'libgmodule*.dylib' 'libgthread*.dylib' 'libpcre2*.dylib' \
+    'libintl*.dylib' 'libffi*.dylib'; do
+    names+=("${lib_root}"/${~pattern})
+  done
+  print -rl -- "${names[@]}"
+}
+
+bottle_config_hash() {
+  local bottle_conf="${USER_HOME_ROOT}/Library/Application Support/CrossOver/Bottles/HSR-CN/cxbottle.conf"
+  if [[ -f "${bottle_conf}" ]]; then
+    hash_file "${bottle_conf}"
+  else
+    print -r -- "missing"
+  fi
+}
+
+write_manifest() {
+  local file="$1"
+  local backup_id="$2"
+  local product="$3"
+  local version="$4"
+  local build_tag="$5"
+  local mode="$6"
+  local source_app="$7"
+  local target_app="$8"
+  local payload_sha="$9"
+  local source_wgs_sha="${10}"
+  local bottle_sha="${11}"
+  local rpath="${12}"
+  shift 12
+  local moved=("$@")
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local moved_json
+  moved_json="$(json_array "${moved[@]}")"
+  cat > "${file}" <<EOF
+{
+  "schema_version": 1,
+  "backup_id": "$(json_escape "${backup_id}")",
+  "product": "$(json_escape "${product}")",
+  "product_version": "$(json_escape "${version}")",
+  "build_tag": "$(json_escape "${build_tag}")",
+  "mode": "$(json_escape "${mode}")",
+  "source_app": "$(json_escape "${source_app}")",
+  "target_app": "$(json_escape "${target_app}")",
+  "payload_sha256": "$(json_escape "${payload_sha}")",
+  "source_winegstreamer_sha256": "$(json_escape "${source_wgs_sha}")",
+  "bottle_config_sha256": "$(json_escape "${bottle_sha}")",
+  "added_rpath": "$(json_escape "${rpath}")",
+  "moved_files": ${moved_json},
+  "signature_result": "verified",
+  "created_at": "${now}"
+}
+EOF
+  /usr/bin/plutil -convert xml1 -o /dev/null "${file}" >/dev/null
+}
+
+add_rpath_if_needed() {
+  local wgs="$1"
+  local rpath="$2"
+  if ! /usr/bin/otool -l "${wgs}" | /usr/bin/grep -Fq "${rpath}"; then
+    /usr/bin/install_name_tool -add_rpath "${rpath}" "${wgs}"
+  fi
+}
+
+verify_patched_app() {
+  local app="$1" product="$2"
+  local cx lib_root wgs plugin_dir framework_lib tmp_registry out
+  cx="$(runtime_root "${app}")"
+  lib_root="$(lib_root_for_product "${product}" "${app}")"
+  wgs="$(winegstreamer_for_app "${app}")"
+  plugin_dir="${lib_root}/gstreamer-1.0"
+  framework_lib="${lib_root}/GStreamer.framework/Versions/Current/lib"
+  local rank_bytes
+  rank_bytes="$(/usr/bin/od -An -tx1 -j 77807 -N 5 "${plugin_dir}/libgstlibav.dylib" | /usr/bin/tr -d '[:space:]')"
+  [[ "${rank_bytes}" == "baffffff7f" ]] || return 1
+
+  /usr/bin/codesign --verify --deep --strict "${app}" >/dev/null || return 1
+  "${DLOPEN_PROBE}" "${wgs}" >/dev/null || return 1
+
+  if (( EUID == 0 )); then
+    log "管理员安装验证：签名、dlopen 和 H.264 rank 字节均通过。"
+    return 0
+  fi
+
+  tmp_registry="$(/usr/bin/mktemp -t hsr-media-registry.XXXXXX)"
+
+  out="$(
+    GST_REGISTRY_FORK=no \
+    DYLD_LIBRARY_PATH="${framework_lib}" \
+    GST_REGISTRY="${tmp_registry}" \
+    GST_PLUGIN_SYSTEM_PATH_1_0="${plugin_dir}" \
+    "${GST_PROBE}" "${plugin_dir}" 2>&1
+  )" || {
+    rm -f "${tmp_registry}"
+    print -u2 -r -- "${out}"
+    return 1
+  }
+  rm -f "${tmp_registry}"
+  log "${out}"
+  [[ "${out}" == *"avdec_h264: PASS"* ]]
+}
+
+patch_product() {
+  local product="$1"
+  local mode="${2:-copy}"
+  local experimental="${3:-0}"
+  local confirmed="${4:-0}"
+  local requested_target="${5:-}"
+
+  local record source_app version build_tag layout
+  if [[ -n "${requested_target}" ]]; then
+    record="$(inspect_app "${requested_target}")" || die 3 "不是兼容的 CrossOver App：${requested_target}"
+  else
+    record="$(detect_product "${product}")" || die 3 "未检测到可补丁的 ${product} App。"
+  fi
+  IFS='|' read -r source_app version build_tag layout <<< "${record}"
+  if [[ "${layout}" != "${product}" ]]; then
+    die 2 "App 布局与产品不匹配：${layout}，期望 ${product}。"
+  fi
+  assert_known_or_experimental "${product}" "${version}" "${experimental}" "${confirmed}"
+  ensure_not_running
+  ensure_payload
+
+  local target_app backup_id backup_dir lib_root plugin_dir framework_dir wgs rpath
+  local source_wgs_sha payload_sha bottle_sha
+  if [[ "${mode}" == "copy" ]]; then
+    target_app="$(target_app_for_product "${product}")"
+    [[ ! -e "${target_app}" ]] || die 3 "修复副本已存在：${target_app}。请先移除或恢复。"
+  elif [[ "${mode}" == "in-place" ]]; then
+    target_app="${source_app}"
+  else
+    die 3 "未知安装模式：${mode}"
+  fi
+
+  local elevated_args=(patch --product "${product}" --mode "${mode}")
+  (( experimental )) && elevated_args+=(--experimental)
+  (( confirmed )) && elevated_args+=(--yes)
+  [[ -n "${requested_target}" ]] && elevated_args+=(--target "${requested_target}")
+  elevate_if_needed "${elevated_args[@]}"
+
+  backup_id="$(create_backup_id)"
+  backup_dir="${BACKUP_ROOT}/${backup_id}"
+  mkdir -p "${backup_dir}/stock-runtime" "${backup_dir}/stock-plugin"
+  /usr/bin/printf '%s\n' "${backup_id}" > "${backup_dir}/backup-id.txt"
+  /usr/bin/printf '%s\n' "${product}" > "${backup_dir}/product.txt"
+  /usr/bin/printf '%s\n' "${mode}" > "${backup_dir}/mode.txt"
+  /usr/bin/printf '%s\n' "${target_app}" > "${backup_dir}/target-app.txt"
+  /usr/bin/printf '%s\n' "${source_app}" > "${backup_dir}/source-app.txt"
+
+  source_wgs_sha="$(hash_file "$(winegstreamer_for_app "${source_app}")")"
+  payload_sha="$(hash_file "${PAYLOAD_ARCHIVE}")"
+  bottle_sha="$(bottle_config_hash)"
+
+  if [[ "${mode}" == "copy" ]]; then
+    log "复制 ${source_app} -> ${target_app}"
+    /usr/bin/ditto "${source_app}" "${target_app}"
+  else
+    log "原位安装：${target_app}"
+  fi
+
+  lib_root="$(lib_root_for_product "${product}" "${target_app}")"
+  plugin_dir="${lib_root}/gstreamer-1.0"
+  framework_dir="${lib_root}/GStreamer.framework"
+  wgs="$(winegstreamer_for_app "${target_app}")"
+  rpath="$(rpath_for_product "${product}")"
+
+  local conflicts=()
+  local conflict_name
+  while IFS= read -r conflict_name; do
+    [[ -n "${conflict_name}" ]] && conflicts+=("${conflict_name}")
+  done < <(collect_conflicts "${lib_root}")
+
+  local moved_names=()
+  local item
+  for item in "${conflicts[@]}"; do
+    local name="${item:t}"
+    /bin/mv "${item}" "${backup_dir}/stock-runtime/${name}"
+    moved_names+=("${name}")
+  done
+
+  if [[ -e "${plugin_dir}" || -L "${plugin_dir}" ]]; then
+    /bin/mv "${plugin_dir}" "${backup_dir}/stock-plugin/gstreamer-1.0"
+  fi
+  if [[ -e "${framework_dir}" ]]; then
+    /bin/mv "${framework_dir}" "${backup_dir}/existing-GStreamer.framework"
+  fi
+
+  log "解压 GStreamer framework"
+  /usr/bin/tar -xJf "${PAYLOAD_ARCHIVE}" -C "${lib_root}"
+  [[ -d "${framework_dir}" ]] || die 4 "payload 未生成 GStreamer.framework。"
+  /bin/ln -s "GStreamer.framework/Versions/Current/lib/gstreamer-1.0" "${plugin_dir}"
+  add_rpath_if_needed "${wgs}" "${rpath}"
+
+  /usr/bin/xattr -cr "${target_app}"
+  log "重新签名 ${target_app}"
+  /usr/bin/codesign --force --deep --sign - "${target_app}"
+  /usr/bin/codesign --verify --deep --strict "${target_app}" || die 4 "App 重新签名后验证失败。"
+
+  log "执行运行时验证"
+  verify_patched_app "${target_app}" "${product}" || die 4 "运行时验证失败。备份保留在 ${backup_dir}。"
+
+  if [[ "${mode}" == "copy" ]]; then
+    local current_source_sha
+    current_source_sha="$(hash_file "$(winegstreamer_for_app "${source_app}")")"
+    [[ "${current_source_sha}" == "${source_wgs_sha}" ]] || die 4 "原始 App 的 winegstreamer.so 发生变化。"
+    [[ "$(bottle_config_hash)" == "${bottle_sha}" ]] || die 4 "HSR-CN cxbottle.conf 发生变化。"
+  fi
+
+  write_manifest "${backup_dir}/backup-manifest.json" "${backup_id}" \
+    "${product}" "${version}" "${build_tag}" "${mode}" "${source_app}" "${target_app}" \
+    "${payload_sha}" "${source_wgs_sha}" "${bottle_sha}" "${rpath}" "${moved_names[@]}"
+
+  log "安装完成：${target_app}"
+  log "备份清单：${backup_dir}/backup-manifest.json"
+  return 0
+}
+
+manifest_value() {
+  local manifest="$1" key="$2"
+  /usr/bin/plutil -extract "${key}" raw -o - "${manifest}" 2>/dev/null
+}
+
+restore_backup() {
+  local backup_id="$1"
+  local backup_dir="${BACKUP_ROOT}/${backup_id}"
+  local manifest="${backup_dir}/backup-manifest.json"
+  [[ -f "${manifest}" ]] || die 3 "找不到备份清单：${manifest}"
+  ensure_not_running
+  elevate_if_needed restore --backup-id "${backup_id}"
+
+  local mode product target_app
+  mode="$(manifest_value "${manifest}" mode)"
+  product="$(manifest_value "${manifest}" product)"
+  target_app="$(manifest_value "${manifest}" target_app)"
+  [[ -n "${mode}" && -n "${product}" && -n "${target_app}" ]] || die 4 "备份清单字段不完整。"
+
+  if [[ "${mode}" == "copy" ]]; then
+    local expected_target
+    expected_target="$(target_app_for_product "${product}")"
+    [[ "${target_app}" == "${expected_target}" ]] || die 4 "备份目标与产品默认路径不一致，拒绝删除。"
+    [[ -d "${target_app}" ]] || die 3 "修复副本不存在：${target_app}"
+    log "删除修复副本：${target_app}"
+    /bin/rm -rf "${target_app}"
+  elif [[ "${mode}" == "in-place" ]]; then
+    local source_app
+    source_app="$(manifest_value "${manifest}" source_app)"
+    [[ "${target_app}" == "${source_app}" ]] || die 4 "原位备份的 source/target 不一致。"
+    local lib_root plugin_dir framework_dir wgs rpath
+    lib_root="$(lib_root_for_product "${product}" "${target_app}")"
+    plugin_dir="${lib_root}/gstreamer-1.0"
+    framework_dir="${lib_root}/GStreamer.framework"
+    wgs="$(winegstreamer_for_app "${target_app}")"
+    rpath="$(manifest_value "${manifest}" added_rpath)"
+
+    [[ -L "${plugin_dir}" ]] && /usr/bin/unlink "${plugin_dir}"
+    [[ -d "${framework_dir}" ]] && /bin/mv "${framework_dir}" "${backup_dir}/patched-GStreamer.framework"
+    if [[ -d "${backup_dir}/existing-GStreamer.framework" ]]; then
+      /bin/mv "${backup_dir}/existing-GStreamer.framework" "${framework_dir}"
+    fi
+    if [[ -d "${backup_dir}/stock-plugin/gstreamer-1.0" ]]; then
+      /bin/mv "${backup_dir}/stock-plugin/gstreamer-1.0" "${plugin_dir}"
+    fi
+    local stock_file
+    for stock_file in "${backup_dir}/stock-runtime"/*; do
+      [[ -e "${stock_file}" ]] || continue
+      /bin/mv "${stock_file}" "${lib_root}/${stock_file:t}"
+    done
+    if /usr/bin/otool -l "${wgs}" | /usr/bin/grep -Fq "${rpath}"; then
+      /usr/bin/install_name_tool -delete_rpath "${rpath}" "${wgs}"
+    fi
+    /usr/bin/xattr -cr "${target_app}"
+    /usr/bin/codesign --force --deep --sign - "${target_app}"
+    /usr/bin/codesign --verify --deep --strict "${target_app}" || die 4 "恢复后的 App 签名验证失败。"
+  else
+    die 4 "未知恢复模式：${mode}"
+  fi
+
+  /bin/rm -rf "${backup_dir}"
+  log "恢复完成：${backup_id}"
+}
+
+list_backups() {
+  local manifest
+  for manifest in "${BACKUP_ROOT}"/*/backup-manifest.json; do
+    [[ -f "${manifest}" ]] || continue
+    local id product version mode target
+    id="${manifest:h:t}"
+    product="$(manifest_value "${manifest}" product)"
+    version="$(manifest_value "${manifest}" product_version)"
+    mode="$(manifest_value "${manifest}" mode)"
+    target="$(manifest_value "${manifest}" target_app)"
+    print -r -- "${id}|${product}|${version}|${mode}|${target}"
+  done
+}
+
+diagnose() {
+  ensure_payload
+  print -r -- "HSR Media Patch 诊断"
+  print -r -- "日志：${LOG_FILE}"
+  print -r -- ""
+  local record product
+  for product in stable preview; do
+    print -r -- "$(product_display_name "${product}")"
+    if record="$(detect_product "${product}")"; then
+      print_detection_line "${record}"
+      local app layout lib_root wgs plugin framework
+      IFS='|' read -r app _ _ layout <<< "${record}"
+      lib_root="$(lib_root_for_product "${product}" "${app}")"
+      wgs="$(winegstreamer_for_app "${app}")"
+      plugin="${lib_root}/gstreamer-1.0"
+      framework="${lib_root}/GStreamer.framework"
+      local rank_bytes="missing"
+      if [[ -f "${plugin}/libgstlibav.dylib" ]]; then
+        rank_bytes="$(/usr/bin/od -An -tx1 -j 77807 -N 5 "${plugin}/libgstlibav.dylib" | /usr/bin/tr -d '[:space:]')"
+      fi
+      print -r -- "  winegstreamer：${wgs}"
+      print -r -- "  libav：$([[ -f "${plugin}/libgstlibav.dylib" ]] && print yes || print no)"
+      print -r -- "  framework：$([[ -d "${framework}" ]] && print yes || print no)"
+      print -r -- "  H.264 rank bytes：${rank_bytes}"
+      /usr/bin/codesign --verify --deep --strict "${app}" >/dev/null 2>&1 \
+        && print -r -- "  签名：valid" \
+        || print -r -- "  签名：invalid"
+    else
+      print -r -- "  未检测到"
+    fi
+    print -r -- ""
+  done
+  print -r -- "安装备份"
+  if list_backups | /usr/bin/grep -q .; then
+    list_backups | while IFS='|' read -r id product version mode target; do
+      print -r -- "  ${id}  ${product} ${version}  ${mode}  ${target}"
+    done
+  else
+    print -r -- "  无"
+  fi
+}
+
+select_product() {
+  local allow_both="${1:-0}"
+  # This function is called through command substitution. Keep the menu on
+  # stderr so stdout contains only the selected product identifier.
+  print -u2 -r -- ""
+  print -u2 -r -- "请选择要处理的 CrossOver："
+  local stable_ok=0 preview_ok=0
+  detect_product stable >/dev/null && stable_ok=1
+  detect_product preview >/dev/null && preview_ok=1
+  [[ "${stable_ok}" == 1 ]] && print -u2 -r -- "  1. 正式版 CrossOver"
+  [[ "${preview_ok}" == 1 ]] && print -u2 -r -- "  2. CrossOver Preview"
+  [[ "${allow_both}" == 1 && "${stable_ok}" == 1 && "${preview_ok}" == 1 ]] \
+    && print -u2 -r -- "  3. 两个都处理"
+  print -u2 -r -- "  0. 返回"
+  local choice
+  read -r "?选择： " choice
+  case "${choice}" in
+    1)
+      if (( stable_ok )); then print -r -- stable; else return 1; fi
+      ;;
+    2)
+      if (( preview_ok )); then print -r -- preview; else return 1; fi
+      ;;
+    3)
+      if (( allow_both && stable_ok && preview_ok )); then
+        print -r -- both
+      else
+        return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+patch_selected_product() {
+  local product="$1" mode="$2"
+  if [[ "${product}" == "both" ]]; then
+    elevate_if_needed patch --product auto --mode "${mode}" --yes
+  else
+    elevate_if_needed patch --product "${product}" --mode "${mode}" --yes
+  fi
+}
+
+menu_restore() {
+  while true; do
+    clear 2>/dev/null || true
+    print -r -- "HSR Media Patch 恢复"
+    print -r -- ""
+    local records=() record index=1
+    while IFS= read -r record; do
+      records+=("${record}")
+      local id product version mode target
+      IFS='|' read -r id product version mode target <<< "${record}"
+      print -r -- "  ${index}. ${product} ${version} [${mode}]"
+      print -r -- "     ${target}"
+      (( index++ ))
+    done < <(list_backups)
+    if (( ${#records} == 0 )); then
+      print -r -- "没有可恢复的安装记录。"
+      read -k1 -r "?按任意键返回..."
+      return 0
+    fi
+    print -r -- "  0. 返回"
+    local choice id
+    read -r "?选择： " choice
+    [[ "${choice}" == "0" ]] && return 0
+    if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#records} )); then
+      id="${records[choice]%%|*}"
+      elevate_if_needed restore --backup-id "${id}"
+      read -k1 -r "?按任意键返回..."
+    fi
+  done
+}
+
+menu_install() {
+  while true; do
+    clear 2>/dev/null || true
+    print -r -- "╔══════════════════════════════════════════╗"
+    print -r -- "║        HSR Media Patch v1.0.0            ║"
+    print -r -- "║  CrossOver 高分辨率过场动画黑屏修复      ║"
+    print -r -- "╚══════════════════════════════════════════╝"
+    print -r -- ""
+    print -r -- "  1. 检测并创建安全副本（推荐）"
+    print -r -- "  2. 诊断当前环境"
+    print -r -- "  3. 原位修改官方 App（危险）"
+    print -r -- "  4. 恢复 / 移除补丁"
+    print -r -- "  5. 查看说明"
+    print -r -- "  0. 退出"
+    print -r -- ""
+    local choice product
+    read -r "?选择： " choice
+    case "${choice}" in
+      1)
+        product="$(select_product 1)" || continue
+        patch_selected_product "${product}" copy
+        read -k1 -r "?安装结束，按任意键返回..."
+        ;;
+      2)
+        diagnose
+        read -k1 -r "?按任意键返回..."
+        ;;
+      3)
+        print -r -- ""
+        print -r -- "原位修改会使官方 App 失去 CodeWeavers 签名，并额外生成运行库备份。"
+        print -r -- "建议先关闭所有 CrossOver 和游戏。"
+        local confirm
+        read -r "?确认请输入 YES： " confirm
+        [[ "${confirm}" == "YES" ]] || continue
+        product="$(select_product 0)" || continue
+        patch_selected_product "${product}" in-place
+        read -k1 -r "?安装结束，按任意键返回..."
+        ;;
+      4) menu_restore ;;
+      5)
+        less "${REPO_ROOT}/README.md"
+        ;;
+      0) exit 0 ;;
+    esac
+  done
+}
+
+parse_detect() {
+  if ! detect_all_installed; then
+    die 3 "未检测到支持的 CrossOver App。"
+  fi
+}
+
+parse_patch() {
+  local product="auto" mode="copy" experimental=0 confirmed=0 target=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --product) product="$2"; shift 2 ;;
+      --mode) mode="$2"; shift 2 ;;
+      --target) target="$2"; shift 2 ;;
+      --experimental) experimental=1; shift ;;
+      --yes) confirmed=1; shift ;;
+      *) die 3 "未知参数：$1" ;;
+    esac
+  done
+
+  if [[ "${product}" == "auto" && -z "${target}" ]]; then
+    local products=()
+    local p
+    while IFS= read -r p; do products+=("${p}"); done < <(list_installed_products)
+    (( ${#products} > 0 )) || die 3 "未检测到可补丁的 CrossOver App。"
+    if (( ${#products} > 1 )); then
+      if [[ "${mode}" == "in-place" ]]; then
+        die 3 "同时检测到两个版本；原位模式必须指定 --product stable|preview。"
+      fi
+      if (( EUID != 0 )); then
+        local elevated_args=(patch --product auto --mode "${mode}")
+        (( experimental )) && elevated_args+=(--experimental)
+        (( confirmed )) && elevated_args+=(--yes)
+        elevate_if_needed "${elevated_args[@]}"
+      fi
+      for p in "${products[@]}"; do
+        patch_product "${p}" "${mode}" "${experimental}" "${confirmed}" ""
+      done
+      return 0
+    fi
+    product="${products[1]}"
+  fi
+
+  if [[ -n "${target}" ]]; then
+    local layout version build app
+    IFS='|' read -r app version build layout <<< "$(inspect_app "${target}")" || die 3 "目标 App 不兼容。"
+    if [[ "${product}" == "auto" ]]; then
+      product="${layout}"
+    elif [[ "${product}" != "${layout}" ]]; then
+      die 2 "目标 App 布局与 --product 不一致。"
+    fi
+    patch_product "${product}" "${mode}" "${experimental}" "${confirmed}" "${target}"
+  else
+    [[ "${product}" == "stable" || "${product}" == "preview" ]] || die 2 "未知产品：${product}"
+    patch_product "${product}" "${mode}" "${experimental}" "${confirmed}" ""
+  fi
+}
+
+parse_restore() {
+  local id=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --backup-id) id="$2"; shift 2 ;;
+      *) die 3 "未知参数：$1" ;;
+    esac
+  done
+  [[ -n "${id}" ]] || die 3 "缺少 --backup-id。"
+  restore_backup "${id}"
+}
+
+main() {
+  local command="${1:-menu-install}"
+  (( $# > 0 )) && shift
+  case "${command}" in
+    menu-install) menu_install ;;
+    menu-restore) menu_restore ;;
+    detect) parse_detect ;;
+    diagnose) diagnose ;;
+    patch) parse_patch "$@" ;;
+    restore) parse_restore "$@" ;;
+    *) die 3 "未知命令：${command}" ;;
+  esac
+}
+
+main "$@"
