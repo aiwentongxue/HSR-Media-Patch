@@ -9,6 +9,13 @@
 - 不修改游戏文件。
 - 不修改 `/etc/hosts`。
 
+## 下载
+
+请从 [GitHub Releases](../../releases/latest) 下载 `HSR-Media-Patch-v1.0.0.zip`。
+
+发布包已经包含安装脚本、恢复脚本、README、完整 GStreamer/FFmpeg framework
+和运行时探针。不要直接下载 GitHub 的 “Source code” 压缩包安装。
+
 ## 支持版本
 
 | CrossOver 产品 | 兼容版本 | 运行时目录 |
@@ -19,7 +26,7 @@
 当前状态：
 
 - Preview `27.0.0.41073`：已实际验证高分辨率过场画面正常。
-- 正式版 `26.3.0.39832`：已验证安装、RPATH、签名、framework 加载和 H.264 rank；实际游戏过场等待发布者复测。
+- 正式版 `26.3.0.39832`：已实际验证高分辨率过场画面正常。
 
 其他版本只有在目录、架构、依赖和插件布局检查全部通过后，才允许以“实验性”模式安装。
 
@@ -28,14 +35,15 @@
 1. 完全退出 CrossOver，关闭所有正在运行的游戏。
 2. 双击 `一键安装补丁.command`。
 3. 在终端菜单中选择 `1. 检测并创建安全副本`。
-4. 输入 Mac 管理员密码。脚本只会向 `/Applications` 复制和修改新的 `*-HSR-MediaFix.app` 副本。
-5. 安装完成后，从 Finder 或启动台打开新生成的修复版 App：
+4. 再选择要处理的版本：正式版、Preview，或两个都处理。
+5. 输入 Mac 管理员密码。脚本只会向 `/Applications` 复制和修改新的 `*-HSR-MediaFix.app` 副本。
+6. 安装完成后，从 Finder 或启动台打开新生成的修复版 App：
    - 正式版：`CrossOver-HSR-MediaFix.app`
    - Preview：`CrossOver Preview-HSR-MediaFix.app`
-6. 按平时的方式使用 Mac 游戏工具箱的 HoYoGames 启动帮助。
-7. 让 hosts 屏蔽倒计时完整结束。
-8. 在修复版 CrossOver 中对 `HSR-CN` 运行原始 `C:\HSR-Mac.bat`。
-9. 游戏进入登录界面后立即恢复 hosts。
+7. 按平时的方式使用 Mac 游戏工具箱的 HoYoGames 启动帮助。
+8. 让 hosts 屏蔽倒计时完整结束。
+9. 在修复版 CrossOver 中对 `HSR-CN` 运行原始 `C:\HSR-Mac.bat`。
+10. 游戏进入登录界面后立即恢复 hosts。
 
 原始 CrossOver App 不会被修改。默认安全副本会同时保留原 App 的签名状态。
 
@@ -95,6 +103,7 @@ scripts/hsr-media-patch
 SHA256SUMS
 VERIFICATION.md
 THIRD_PARTY_NOTICES.md
+SOURCE_OFFER.md
 ```
 
 源码仓库不跟踪 framework 压缩包。`scripts/build-release.sh` 会从固定来源下载并校验框架，再生成最终 Release ZIP。
@@ -119,7 +128,24 @@ Preview 原生 GStreamer 不包含 `libgstlibav`。高分辨率 H.264 会优先�
 - H.264 软件解码器 rank `2147483647`，高于 `vtdec_hw`。
 - 针对两版 CrossOver 分别配置的正确 RPATH。
 
+## 原理与边界
+
+这是一个运行库层面的兼容修复：
+
+1. 脚本复制官方 CrossOver App，不覆盖原 App。
+2. 脚本备份并移走目标副本内冲突的 GStreamer/GLib 动态库。
+3. 脚本安装内置的 x86_64 GStreamer/FFmpeg framework。
+4. 脚本为 `winegstreamer.so` 添加相对 RPATH。
+5. 脚本把 `libgstlibav` 的 H.264 decoder rank 提升到最高值。
+6. 脚本清理扩展属性、重新进行本地 ad-hoc 签名，并执行运行时验证。
+
+此补丁不提供游戏本体、绕过登录限制或修改游戏账号数据。它只解决已有
+Windows、Wine 和 CrossOver 环境中的媒体解码路径问题。
+
 ## 许可证
 
 本仓库脚本和文档采用 MIT License。GStreamer、FFmpeg 及其他第三方组件遵循各自许可证，详见 `THIRD_PARTY_NOTICES.md`。
+
+发布包内第三方二进制的来源、固定版本、修改内容和源码下载地址见
+`SOURCE_OFFER.md`。第三方许可证文本位于 `licenses/`。
 

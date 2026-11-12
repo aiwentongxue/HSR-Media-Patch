@@ -15,10 +15,14 @@ fi
 mkdir -p "${STAGE}/payload" "${STAGE}/scripts" "${STAGE}/tools" "${STAGE}/docs"
 
 for item in \
-  README.md LICENSE THIRD_PARTY_NOTICES.md \
+  README.md LICENSE THIRD_PARTY_NOTICES.md SOURCE_OFFER.md \
   一键安装补丁.command 一键恢复.command; do
   /usr/bin/ditto --norsrc --noextattr "${ROOT}/${item}" "${STAGE}/${item}"
 done
+
+if [[ -d "${ROOT}/licenses" ]]; then
+  /usr/bin/ditto --norsrc --noextattr "${ROOT}/licenses" "${STAGE}/licenses"
+fi
 
 for item in scripts/hsr-media-patch scripts/patch-rank.py; do
   /usr/bin/ditto --norsrc --noextattr "${ROOT}/${item}" "${STAGE}/${item}"
@@ -53,6 +57,8 @@ fi
 
 /usr/bin/ditto --norsrc --noextattr "${ROOT}/THIRD_PARTY_NOTICES.md" \
   "${DIST}/THIRD_PARTY_NOTICES.md"
+/usr/bin/ditto --norsrc --noextattr "${ROOT}/SOURCE_OFFER.md" \
+  "${DIST}/SOURCE_OFFER.md"
 if [[ -f "${ROOT}/docs/VERIFICATION.md" ]]; then
   /usr/bin/ditto --norsrc --noextattr "${ROOT}/docs/VERIFICATION.md" \
     "${DIST}/VERIFICATION.md"
@@ -63,6 +69,7 @@ cd "${DIST}"
   /usr/bin/shasum -a 256 "${ZIP:t}"
   /usr/bin/shasum -a 256 VERIFICATION.md
   /usr/bin/shasum -a 256 THIRD_PARTY_NOTICES.md
+  /usr/bin/shasum -a 256 SOURCE_OFFER.md
 } > SHA256SUMS
 
 print "Built release: ${ZIP}"

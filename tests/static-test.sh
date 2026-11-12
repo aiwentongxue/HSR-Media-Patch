@@ -16,6 +16,12 @@ done
 
 python3 -m py_compile "${ROOT}/scripts/patch-rank.py"
 
+[[ -f "${ROOT}/LICENSE" ]]
+[[ -f "${ROOT}/THIRD_PARTY_NOTICES.md" ]]
+[[ -f "${ROOT}/SOURCE_OFFER.md" ]]
+[[ -s "${ROOT}/licenses/LGPL-2.1.txt" ]]
+[[ -s "${ROOT}/licenses/GPL-2.0.txt" ]]
+
 xcrun clang -arch x86_64 -std=c11 -Wall -Wextra -Werror \
   -c "${ROOT}/tools/dlopen-probe.c" -o /tmp/hsr-dlopen-probe.o
 xcrun clang -arch x86_64 -std=c11 -Wall -Wextra -Werror \

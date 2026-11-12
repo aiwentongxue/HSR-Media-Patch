@@ -22,6 +22,11 @@ PACKAGE="$(/usr/bin/find "${TMP}" -maxdepth 1 -type d -name 'HSR-Media-Patch-v*'
 [[ -x "${PACKAGE}/scripts/hsr-media-patch" ]]
 [[ -x "${PACKAGE}/tools/dlopen-probe" ]]
 [[ -x "${PACKAGE}/tools/gst-probe" ]]
+[[ -f "${PACKAGE}/LICENSE" ]]
+[[ -f "${PACKAGE}/SOURCE_OFFER.md" ]]
+[[ -f "${PACKAGE}/THIRD_PARTY_NOTICES.md" ]]
+[[ -f "${PACKAGE}/licenses/LGPL-2.1.txt" ]]
+[[ -f "${PACKAGE}/licenses/GPL-2.0.txt" ]]
 
 EXPECTED="$(/usr/bin/tr -d '[:space:]' < "${PACKAGE}/payload/GStreamer.framework.tar.xz.sha256")"
 ACTUAL="$(/usr/bin/shasum -a 256 "${PACKAGE}/payload/GStreamer.framework.tar.xz" | awk '{print $1}')"
