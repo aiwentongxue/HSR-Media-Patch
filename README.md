@@ -11,22 +11,20 @@
 
 ## 下载
 
-请从 [GitHub Releases](../../releases/latest) 下载 `HSR-Media-Patch-v1.0.0.zip`。
+请解压 `HSR-Media-Patch-v1.1.0.zip` 后运行里面的安装脚本。发布版本可在 [GitHub Releases](../../releases) 获取。
 
 发布包已经包含安装脚本、恢复脚本、README、完整 GStreamer/FFmpeg framework
 和运行时探针。不要直接下载 GitHub 的 “Source code” 压缩包安装。
 
 ## 支持版本
 
-| CrossOver 产品 | 兼容版本 | 运行时目录 |
-| --- | --- | --- |
-| 正式版 CrossOver | `26.3.0.39832` | `lib64` |
-| CrossOver Preview | `27.0.0.41073` | `lib/x86_64` |
+| CrossOver 产品 | 兼容版本 | 运行时目录 | 验证结果 |
+| --- | --- | --- | --- |
+| CrossOver Preview `20261111` | `27.0.0.41303` | `lib/x86_64` | 已验证游戏内过场及 1440p H.264 解码 |
+| CrossOver Preview | `27.0.0.41073` | `lib/x86_64` | 已验证游戏内高分辨率过场 |
+| 正式版 CrossOver | `26.3.0.39832` | `lib64` | 已验证游戏内高分辨率过场 |
 
-当前状态：
-
-- Preview `27.0.0.41073`：已实际验证高分辨率过场画面正常。
-- 正式版 `26.3.0.39832`：已实际验证高分辨率过场画面正常。
+补丁适用于 `win64` 容器，例如使用 Rosetta 的 `HSR-CN`。Preview 的原生 ARM64 容器使用另一套运行库。
 
 其他版本只有在目录、架构、依赖和插件布局检查全部通过后，才允许以“实验性”模式安装。
 
@@ -36,14 +34,11 @@
 2. 双击 `一键安装补丁.command`。
 3. 在终端菜单中选择 `1. 检测并创建安全副本`。
 4. 再选择要处理的版本：正式版、Preview，或两个都处理。
-5. 输入 Mac 管理员密码。脚本只会向 `/Applications` 复制和修改新的 `*-HSR-MediaFix.app` 副本。
+5. 脚本在 `/Applications` 创建新的 `*-HSR-MediaFix.app`。当前用户没有该目录的写入权限时，按提示输入管理员密码。
 6. 安装完成后，从 Finder 或启动台打开新生成的修复版 App：
    - 正式版：`CrossOver-HSR-MediaFix.app`
    - Preview：`CrossOver Preview-HSR-MediaFix.app`
-7. 按平时的方式使用 Mac 游戏工具箱的 HoYoGames 启动帮助。
-8. 让 hosts 屏蔽倒计时完整结束。
-9. 在修复版 CrossOver 中对 `HSR-CN` 运行原始 `C:\HSR-Mac.bat`。
-10. 游戏进入登录界面后立即恢复 hosts。
+7. 在修复版 CrossOver 中用平时的方式启动 `HSR-CN`，进入游戏播放此前黑屏的过场。
 
 原始 CrossOver App 不会被修改。默认安全副本会同时保留原 App 的签名状态。
 
@@ -77,9 +72,9 @@
 
 常见问题：
 
-- **macOS 阻止打开 `.command`**：右键选择“打开”；仍被阻止时，在终端运行 `xattr -cr HSR-Media-Patch-v1.0.0`。
+- **macOS 阻止打开 `.command`**：右键选择“打开”。仍被阻止时，在终端运行 `xattr -cr HSR-Media-Patch-v1.1.0`。
 - **提示 App 正在运行**：退出 CrossOver 和所有 Wine 游戏后重试。
-- **版本被拒绝**：当前构建只完整验证了上表中的两个版本。实验版本必须通过结构检查，并明确输入 `YES`。
+- **版本被拒绝**：上表列出了默认安装支持的版本。其他版本通过结构检查后，可在命令行用 `--experimental --yes` 试装。
 - **签名验证失败**：工具会停止并保留备份，不会继续覆盖。
 - **游戏仍黑屏**：运行诊断，并确认启动的是 `*-HSR-MediaFix.app`，而不是原始 CrossOver。
 
@@ -111,8 +106,8 @@ SOURCE_OFFER.md
 源码维护者重新生成发布包：
 
 ```bash
-./scripts/build-release.sh 1.0.0
-./scripts/verify-release.sh dist/HSR-Media-Patch-v1.0.0.zip
+./scripts/build-release.sh 1.1.0
+./scripts/verify-release.sh dist/HSR-Media-Patch-v1.1.0.zip
 ```
 
 构建环境需要 macOS、Xcode Command Line Tools、`curl`、`tar` 和 `codesign`。

@@ -2,8 +2,10 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-ZIP="${1:-${ROOT}/dist/HSR-Media-Patch-v1.0.0.zip}"
+ZIP="${1:-${ROOT}/dist/HSR-Media-Patch-v1.1.0.zip}"
 TMP="$(/usr/bin/mktemp -d -t hsr-media-release.XXXXXX)"
+trap '/bin/rm -rf -- "${TMP}"' EXIT
+export HSR_MEDIA_USER_HOME="${TMP}/home"
 
 [[ -f "${ZIP}" ]] || {
   print -u2 "Missing ZIP: ${ZIP}"
@@ -34,10 +36,8 @@ ACTUAL="$(/usr/bin/shasum -a 256 "${PACKAGE}/payload/GStreamer.framework.tar.xz"
 
 zsh -n "${PACKAGE}/scripts/hsr-media-patch"
 "${PACKAGE}/scripts/hsr-media-patch" detect >/dev/null
-"${PACKAGE}/scripts/hsr-media-patch" diagnose >/tmp/hsr-media-release-diagnose.txt
+"${PACKAGE}/scripts/hsr-media-patch" diagnose
 
 print "Release ZIP verification passed."
-print "Root: ${PACKAGE}"
 print "Payload SHA-256: ${ACTUAL}"
-print "/tmp/hsr-media-release-diagnose.txt"
 

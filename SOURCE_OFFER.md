@@ -1,6 +1,6 @@
 # Third-Party Source And Build Information
 
-本文档对应 `HSR-Media-Patch v1.0.0` Release。
+本文档对应 `HSR-Media-Patch v1.1.0` 发布包。
 
 ## Bundled runtime
 
@@ -55,8 +55,8 @@ To reproduce the runtime:
 To rebuild the complete Release ZIP:
 
 ```bash
-./scripts/build-release.sh 1.0.0
-./scripts/verify-release.sh dist/HSR-Media-Patch-v1.0.0.zip
+./scripts/build-release.sh 1.1.0
+./scripts/verify-release.sh dist/HSR-Media-Patch-v1.1.0.zip
 ```
 
 ## Replacement

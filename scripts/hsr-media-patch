@@ -19,7 +19,7 @@ PREVIEW_APP="/Applications/CrossOver Preview.app"
 STABLE_TARGET="/Applications/CrossOver-HSR-MediaFix.app"
 PREVIEW_TARGET="/Applications/CrossOver Preview-HSR-MediaFix.app"
 STABLE_VERSION="26.3.0.39832"
-PREVIEW_VERSION="27.0.0.41073"
+PREVIEW_VERSIONS=(27.0.0.41073 27.0.0.41303)
 
 mkdir -p "${LOG_DIR}" "${BACKUP_ROOT}"
 LOG_FILE="${LOG_DIR}/$(date +%Y%m%d-%H%M%S)-$$.log"
@@ -122,10 +122,10 @@ product_display_name() {
   esac
 }
 
-expected_version() {
+supported_versions() {
   case "$1" in
     stable) print -r -- "${STABLE_VERSION}" ;;
-    preview) print -r -- "${PREVIEW_VERSION}" ;;
+    preview) print -rl -- "${PREVIEW_VERSIONS[@]}" ;;
   esac
 }
 
@@ -233,13 +233,13 @@ list_installed_products() {
 
 assert_known_or_experimental() {
   local product="$1" version="$2" experimental="$3" confirm="$4"
-  local expected
-  expected="$(expected_version "${product}")"
-  if [[ "${version}" == "${expected}" ]]; then
-    return 0
-  fi
+  local versions supported
+  versions="$(supported_versions "${product}")"
+  for supported in ${(f)versions}; do
+    [[ "${version}" == "${supported}" ]] && return 0
+  done
   if [[ "${experimental}" != "1" || "${confirm}" != "1" ]]; then
-    die 2 "检测到未验证版本 ${version}。完整支持版本为 ${expected}；实验模式需同时使用 --experimental 和 --yes。"
+    die 2 "检测到未验证版本 ${version}。支持版本：${versions//$'\n'/、}。实验模式需同时使用 --experimental 和 --yes。"
   fi
   warn "将按实验模式处理 ${product} ${version}。"
 }
@@ -445,7 +445,9 @@ patch_product() {
   (( experimental )) && elevated_args+=(--experimental)
   (( confirmed )) && elevated_args+=(--yes)
   [[ -n "${requested_target}" ]] && elevated_args+=(--target "${requested_target}")
-  elevate_if_needed "${elevated_args[@]}"
+  if [[ "${mode}" == "in-place" || ! -w "${target_app:h}" ]]; then
+    elevate_if_needed "${elevated_args[@]}"
+  fi
 
   backup_id="$(create_backup_id)"
   backup_dir="${BACKUP_ROOT}/${backup_id}"
@@ -535,8 +537,6 @@ restore_backup() {
   local manifest="${backup_dir}/backup-manifest.json"
   [[ -f "${manifest}" ]] || die 3 "找不到备份清单：${manifest}"
   ensure_not_running
-  elevate_if_needed restore --backup-id "${backup_id}"
-
   local mode product target_app
   mode="$(manifest_value "${manifest}" mode)"
   product="$(manifest_value "${manifest}" product)"
@@ -548,9 +548,13 @@ restore_backup() {
     expected_target="$(target_app_for_product "${product}")"
     [[ "${target_app}" == "${expected_target}" ]] || die 4 "备份目标与产品默认路径不一致，拒绝删除。"
     [[ -d "${target_app}" ]] || die 3 "修复副本不存在：${target_app}"
+    if [[ ! -w "${target_app:h}" || ! -O "${target_app}" || ! -O "${backup_dir}" ]]; then
+      elevate_if_needed restore --backup-id "${backup_id}"
+    fi
     log "删除修复副本：${target_app}"
     /bin/rm -rf "${target_app}"
   elif [[ "${mode}" == "in-place" ]]; then
+    elevate_if_needed restore --backup-id "${backup_id}"
     local source_app
     source_app="$(manifest_value "${manifest}" source_app)"
     [[ "${target_app}" == "${source_app}" ]] || die 4 "原位备份的 source/target 不一致。"
@@ -681,9 +685,9 @@ select_product() {
 patch_selected_product() {
   local product="$1" mode="$2"
   if [[ "${product}" == "both" ]]; then
-    elevate_if_needed patch --product auto --mode "${mode}" --yes
+    parse_patch --product auto --mode "${mode}" --yes
   else
-    elevate_if_needed patch --product "${product}" --mode "${mode}" --yes
+    parse_patch --product "${product}" --mode "${mode}" --yes
   fi
 }
 
@@ -712,7 +716,7 @@ menu_restore() {
     [[ "${choice}" == "0" ]] && return 0
     if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#records} )); then
       id="${records[choice]%%|*}"
-      elevate_if_needed restore --backup-id "${id}"
+      restore_backup "${id}"
       read -k1 -r "?按任意键返回..."
     fi
   done
@@ -722,7 +726,7 @@ menu_install() {
   while true; do
     clear 2>/dev/null || true
     print -r -- "╔══════════════════════════════════════════╗"
-    print -r -- "║        HSR Media Patch v1.0.0            ║"
+    print -r -- "║        HSR Media Patch v1.1.0            ║"
     print -r -- "║  CrossOver 高分辨率过场动画黑屏修复      ║"
     print -r -- "╚══════════════════════════════════════════╝"
     print -r -- ""
@@ -793,7 +797,7 @@ parse_patch() {
       if [[ "${mode}" == "in-place" ]]; then
         die 3 "同时检测到两个版本；原位模式必须指定 --product stable|preview。"
       fi
-      if (( EUID != 0 )); then
+      if (( EUID != 0 )) && [[ ! -w "${STABLE_TARGET:h}" || ! -w "${PREVIEW_TARGET:h}" ]]; then
         local elevated_args=(patch --product auto --mode "${mode}")
         (( experimental )) && elevated_args+=(--experimental)
         (( confirmed )) && elevated_args+=(--yes)

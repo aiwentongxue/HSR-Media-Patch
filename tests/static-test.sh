@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 PAYLOAD="${ROOT}/payload/GStreamer.framework.tar.xz"
 HASH_FILE="${PAYLOAD}.sha256"
+TMP="$(/usr/bin/mktemp -d -t hsr-media-static.XXXXXX)"
+trap '/bin/rm -rf -- "${TMP}"' EXIT
+export HSR_MEDIA_USER_HOME="${TMP}"
 
 for script in \
   "${ROOT}/一键安装补丁.command" \
@@ -14,7 +17,7 @@ for script in \
   zsh -n "${script}"
 done
 
-python3 -m py_compile "${ROOT}/scripts/patch-rank.py"
+PYTHONPYCACHEPREFIX="${TMP}/pycache" python3 -m py_compile "${ROOT}/scripts/patch-rank.py"
 
 [[ -f "${ROOT}/LICENSE" ]]
 [[ -f "${ROOT}/THIRD_PARTY_NOTICES.md" ]]
@@ -23,9 +26,9 @@ python3 -m py_compile "${ROOT}/scripts/patch-rank.py"
 [[ -s "${ROOT}/licenses/GPL-2.0.txt" ]]
 
 xcrun clang -arch x86_64 -std=c11 -Wall -Wextra -Werror \
-  -c "${ROOT}/tools/dlopen-probe.c" -o /tmp/hsr-dlopen-probe.o
+  -c "${ROOT}/tools/dlopen-probe.c" -o "${TMP}/dlopen-probe.o"
 xcrun clang -arch x86_64 -std=c11 -Wall -Wextra -Werror \
-  -c "${ROOT}/tools/gst-probe.c" -o /tmp/hsr-gst-probe.o
+  -c "${ROOT}/tools/gst-probe.c" -o "${TMP}/gst-probe.o"
 
 if [[ -f "${PAYLOAD}" && -f "${HASH_FILE}" ]]; then
   EXPECTED="$(tr -d '[:space:]' < "${HASH_FILE}")"
@@ -49,8 +52,9 @@ if (( generated_tools == 0 )); then
   echo "Generated probe tools are absent; source compilation checks passed."
 fi
 
-[[ "$("${ROOT}/scripts/hsr-media-patch" detect)" == *"26.3.0.39832"* ]]
-[[ "$("${ROOT}/scripts/hsr-media-patch" detect)" == *"27.0.0.41073"* ]]
+detected="$("${ROOT}/scripts/hsr-media-patch" detect)"
+[[ "${detected}" == *"|26.3.0.39832|"* ]]
+[[ "${detected}" == *"|27.0.0.41073|"* || "${detected}" == *"|27.0.0.41303|"* ]]
 
 echo "Static tests passed."
 

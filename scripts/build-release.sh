@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-VERSION="${1:-1.0.0}"
+VERSION="${1:-1.1.0}"
 DIST="${ROOT}/dist"
 STAGE="${DIST}/HSR-Media-Patch-v${VERSION}"
 ZIP="${DIST}/HSR-Media-Patch-v${VERSION}.zip"
